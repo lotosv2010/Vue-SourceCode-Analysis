@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据驱动-update</title>
+    <script src="../dist/vue.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+    <script>
+      new Vue({
+        el: '#app',
+        render: function (createElement) {
+          return createElement('div', {
+            attrs: {
+              id: 'app'
+            },
+          }, this.message)
+        },
+        data: {
+          message: 'Hello Vue!'
+        }
+      })
+    </script>
+</body>
+</html>
