@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>组件化-createComponent</title>
+  <script src="../dist/vue.js"></script>
+</head>
+<body>
+  <div id="app">{{ msg }}</div>
+    <script>
+      const MyComponent = {
+        // 模板
+        template: '<div>{{msg}} {{privateMsg}}</div>',
+        // 接受参数
+        props: {
+          msg: String    
+        },
+        // 私有数据，需要在函数中返回以避免多个实例共享一个对象
+        data () {
+          return {
+            privateMsg: 'component!'
+          }
+        }
+      }
+
+      const App = {
+        template: `<my-component :msg="msg"></my-component>`,
+        components: {
+          MyComponent
+        },
+        data() {
+          return {
+            msg: 'hello vue'
+          }
+        }
+      }
+
+      new Vue({
+        el: '#app',
+        render: createComponent => createComponent(App)
+      })
+    </script>
+</body>
+</html>
