@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>组件化-组件注册</title>
+  <script src="../../dist/vue.js"></script>
+</head>
+<body>
+  <div id="app">{{ msg }}</div>
+    <script>
+      const ChildComp = {
+        // 模板
+        template: 
+        `
+          <div>
+            <div>{{msg}}</div>
+            <child-comp-two />
+          </div>
+        `,
+        // 私有数据，需要在函数中返回以避免多个实例共享一个对象
+        data () {
+          return {
+            msg: '局部注册!'
+          }
+        }
+      }
+
+      Vue.component(`child-comp-two`, {
+        // 模板
+        template: '<div>{{msg}}</div>',
+        // 私有数据，需要在函数中返回以避免多个实例共享一个对象
+        data () {
+          return {
+            msg: '全局注册!'
+          }
+        }
+      })
+
+      new Vue({
+        el: '#app',
+        render: h => h(ChildComp)
+      })
+    </script>
+</body>
+</html>
