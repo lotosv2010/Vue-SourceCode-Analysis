@@ -8,3 +8,7 @@
 
 #### 04. [数据驱动](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/04-%E6%95%B0%E6%8D%AE%E9%A9%B1%E5%8A%A8.md)
 
+#### 05. [组件化](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/05-%E7%BB%84%E4%BB%B6%E5%8C%96.md)
+
+#### 06. [响应式原理](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/06-%E6%B7%B1%E5%85%A5%E5%93%8D%E5%BA%94%E5%BC%8F%E5%8E%9F%E7%90%86.md)
+
