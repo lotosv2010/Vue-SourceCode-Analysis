@@ -12,3 +12,5 @@
 
 #### 06. [响应式原理](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/06-%E6%B7%B1%E5%85%A5%E5%93%8D%E5%BA%94%E5%BC%8F%E5%8E%9F%E7%90%86.md)
 
+#### 07. [编译原理](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/07-%E7%BC%96%E8%AF%91%E5%8E%9F%E7%90%86.md)
+
