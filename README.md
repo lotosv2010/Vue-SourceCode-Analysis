@@ -14,3 +14,9 @@
 
 #### 07. [编译原理](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/07-%E7%BC%96%E8%AF%91%E5%8E%9F%E7%90%86.md)
 
+#### 08. [扩展](hhttps://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/08-%E6%89%A9%E5%B1%95.md)
+
+#### 09. [Vue-Router](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/09-Vue-Router.md)
+
+#### 10. [Vuex](https://github.com/lotosv2010/Vue-SourceCode-Analysis/blob/master/docs/md/10-Vuex.md)
+
