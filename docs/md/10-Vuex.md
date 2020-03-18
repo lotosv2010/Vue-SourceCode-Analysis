@@ -1228,35 +1228,1044 @@ _withCommit (fn) {
 
 ### 4. `API` 	
 
+​	上一节我们对 `Vuex` 的初始化过程有了深入的分析，在我们构造好这个 `store` 后，需要提供一些 `API` 对这个 `store` 做存取的操作，那么这一节我们就从源码的角度对这些 `API` 做分析。
+
 #### 		4.1 数据获取
+
+​		`Vuex` 最终存储的数据是在 `state` 上的，我们之前分析过在 `store.state` 存储的是 `root` `state` ，那么对于模块上的 `state` ，假设我们有 2 个嵌套的 `modules`，它们的` key` 分别为` a` 和 `b` ，我们可以通过 `store.state.a.b.xxx` 的方式去获取。它的实现是在发生在 `installModule` 的时候:
+
+​		源码目录：`src/store.js` 
+
+```js
+function installModule (store, rootState, path, module, hot) {
+  // ...
+
+  // set state
+  if (!isRoot && !hot) {
+    const parentState = getNestedState(rootState, path.slice(0, -1))
+    const moduleName = path[path.length - 1]
+    store._withCommit(() => {
+      if (process.env.NODE_ENV !== 'production') {
+        if (moduleName in parentState) {
+          console.warn(
+            `[vuex] state field "${moduleName}" was overridden by a module with the same name at "${path.join('.')}"`
+          )
+        }
+      }
+      Vue.set(parentState, moduleName, module.state)
+    })
+  }
+
+  // ...
+}
+```
+
+​		在递归执行 `installModule`  的过程中，就完成了整个 `state` 的建设，这样我们就可以通过 `module` 名的 `path` 去访问一个深层 `module` 的 `state`。
+
+​		有些时候，我们获取的数据不仅仅是一个 `state` ，而是由多个 `state` 计算而来，`Vuex` 提供了 `getters`，允许我们定义一个 `getter` 函数。
+
+```js
+getters: {
+  total (state, getters, localState, localGetters) {
+		// 可访问全局 state 和 getters，以及如果是在 modules 下面，可以访问到局部 state 和 局部 getters
+		return state.a + state.b 
+  }
+}
+```
+
+​		我们在 `installModule` 的过程中，递归执行了所有 `getters` 定义的注册，在之后的 `restStoreVM` 过程中，执行了 `store.getters` 的初始化工作。
+
+​		源码目录：`src/store.js` 
+
+```js
+function installModule (store, rootState, path, module, hot) {
+  // ...
+  const namespace = store._modules.getNamespace(path)
+
+  // ...
+
+  const local = module.context = makeLocalContext(store, namespace, path)
+
+  // ...
+
+  module.forEachGetter((getter, key) => {
+    const namespacedType = namespace + key
+    registerGetter(store, namespacedType, getter, local)
+  })
+
+  // ...
+}
+
+function makeLocalGetters (store, namespace) {
+  if (!store._makeLocalGettersCache[namespace]) {
+    const gettersProxy = {}
+    const splitPos = namespace.length
+    Object.keys(store.getters).forEach(type => {
+      // skip if the target getter is not match this namespace
+      if (type.slice(0, splitPos) !== namespace) return
+
+      // extract local getter type
+      const localType = type.slice(splitPos)
+
+      // Add a port to the getters proxy.
+      // Define as getter property because
+      // we do not want to evaluate the getters in this time.
+      Object.defineProperty(gettersProxy, localType, {
+        get: () => store.getters[type],
+        enumerable: true
+      })
+    })
+    store._makeLocalGettersCache[namespace] = gettersProxy
+  }
+
+  return store._makeLocalGettersCache[namespace]
+}
+
+function resetStoreVM (store, state, hot) {
+  const oldVm = store._vm
+
+  // bind store public getters
+  store.getters = {}
+  // reset local getters cache
+  store._makeLocalGettersCache = Object.create(null)
+  const wrappedGetters = store._wrappedGetters
+  const computed = {}
+  forEachValue(wrappedGetters, (fn, key) => {
+    // use computed to leverage its lazy-caching mechanism
+    // direct inline function use will lead to closure preserving oldVm.
+    // using partial to return function with only arguments preserved in closure environment.
+    computed[key] = partial(fn, store)
+    Object.defineProperty(store.getters, key, {
+      get: () => store._vm[key],
+      enumerable: true // for local getters
+    })
+  })
+
+  // use a Vue instance to store the state tree
+  // suppress warnings just in case the user has added
+  // some funky global mixins
+  const silent = Vue.config.silent
+  Vue.config.silent = true
+  store._vm = new Vue({
+    data: {
+      $$state: state
+    },
+    computed
+  })
+  Vue.config.silent = silent
+
+  // enable strict mode for new vm
+  if (store.strict) {
+    enableStrictMode(store)
+  }
+
+  if (oldVm) {
+    if (hot) {
+      // dispatch changes in all subscribed watchers
+      // to force getter re-evaluation for hot reloading.
+      store._withCommit(() => {
+        oldVm._data.$$state = null
+      })
+    }
+    Vue.nextTick(() => oldVm.$destroy())
+  }
+}
+```
+
+​		我们在 `installModule` 的过程中，为建立了每个模块的上下文环境， 因此当我们访问 `store.getter.xx` 的时候，实际上就是执行了 `rawGetter(local, state, ...)` ， `rawGetter` 就是我们定义的 `getter` 方法，这也就是为什么我们的 `getter` 函数支持四个参数，并且除了全局的 `state` 和 `getter` 外，我们还可以访问到当前 `module`下的`state` 和 `getter` 。
 
 #### 		4.2 数据存储
 
+​		`Vuex` 对数据存储的存储本质上就是对 `state` 做修改，并且只允许我们通过提交 `mutaion` 的形式去修改 `state` ， `mutation` 是一个函数，如下。
+
+```js
+mutations: {
+  increment (state) {
+		state.count++ 
+  }
+}
+```
+
+​		`mutations` 的初始化也是在 `installModule` 的时候。
+
+​		源码目录：`src/store.js` 
+
+```js
+function installModule (store, rootState, path, module, hot) {
+  // ...
+  const namespace = store._modules.getNamespace(path)
+
+  // ...
+
+  const local = module.context = makeLocalContext(store, namespace, path)
+
+  module.forEachMutation((mutation, key) => {
+    const namespacedType = namespace + key
+    registerMutation(store, namespacedType, mutation, local)
+  })
+
+  // ...
+}
+
+function registerMutation (store, type, handler, local) {
+  const entry = store._mutations[type] || (store._mutations[type] = [])
+  entry.push(function wrappedMutationHandler (payload) {
+    handler.call(store, local.state, payload)
+  })
+}
+```
+
+​		`store` 提供了 `commit` 方法让我们提交一个 `mutation`。
+
+​		源码目录：`src/store.js` 
+
+```js
+export class Store {
+  // ...
+  commit (_type, _payload, _options) {
+    // check object-style commit
+    const {
+      type,
+      payload,
+      options
+    } = unifyObjectStyle(_type, _payload, _options)
+
+    const mutation = { type, payload }
+    const entry = this._mutations[type]
+    if (!entry) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.error(`[vuex] unknown mutation type: ${type}`)
+      }
+      return
+    }
+    this._withCommit(() => {
+      entry.forEach(function commitIterator (handler) {
+        handler(payload)
+      })
+    })
+
+    this._subscribers
+      .slice() // shallow copy to prevent iterator invalidation if subscriber synchronously calls unsubscribe
+      .forEach(sub => sub(mutation, this.state))
+
+    if (
+      process.env.NODE_ENV !== 'production' &&
+      options && options.silent
+    ) {
+      console.warn(
+        `[vuex] mutation type: ${type}. Silent option has been removed. ` +
+        'Use the filter functionality in the vue-devtools'
+      )
+    }
+  }
+  // ...
+}
+```
+
+​		这里传入的 `_type`  就是 `mutation` 的 `type`，我们可以从 `store._mutations` 找到对应的函数数组，遍历它们执行获取到每个 `handler` 然后执行，实际上就是执行了 `hwrappedMutationHandler(playload)`，接着会执行我们定义的 `mutation` 函数，并传入当前模块的 `state` ，所以我们的 `mutation` 函数也就是对当前模块的 `state` 做修改。
+
+​		需要注意的是， `mutation` 必须是同步函数，但是我们在开发实际项目中，经常会遇到要先去发送一个请求，然后根据请求的结果去修改 `state` ，那么单纯只通过 `mutation` 是无法完成需求，因此 `Vuex` 又给我们设计了一个 `action` 的概念。
+
+​		`action` 类似于 `mutation` ，不同在于 `action` 提交的是 `mutation` ，而不是直接操作 `state` ， 并且它可以包含任意异步操作。例如:
+
+```js
+mutations: {
+  increment (state) {
+		state.count++ 
+  }
+}, 
+actions: {
+  increment (context) {
+    setTimeout(() => {
+			context.commit('increment') 
+    }, 0)
+	} 
+}
+```
+
+​		`actions` 的初始化也是在 `installModule` 的时候。
+
+​		源码目录：`src/store.js` 
+
+```js
+function installModule (store, rootState, path, module, hot) {
+  // ...
+  const namespace = store._modules.getNamespace(path)
+
+  // ...
+
+  const local = module.context = makeLocalContext(store, namespace, path)
+
+  // ...
+
+  module.forEachAction((action, key) => {
+    const type = action.root ? key : namespace + key
+    const handler = action.handler || action
+    registerAction(store, type, handler, local)
+  })
+
+  // ...
+}
+
+function registerAction (store, type, handler, local) {
+  const entry = store._actions[type] || (store._actions[type] = [])
+  entry.push(function wrappedActionHandler (payload) {
+    let res = handler.call(store, {
+      dispatch: local.dispatch,
+      commit: local.commit,
+      getters: local.getters,
+      state: local.state,
+      rootGetters: store.getters,
+      rootState: store.state
+    }, payload)
+    if (!isPromise(res)) {
+      res = Promise.resolve(res)
+    }
+    if (store._devtoolHook) {
+      return res.catch(err => {
+        store._devtoolHook.emit('vuex:error', err)
+        throw err
+      })
+    } else {
+      return res
+    }
+  })
+}
+```
+
+​		`store` 提供了 `dispatch` 方法让我们提交一个 `action `。
+
+​		源码目录：`src/store.js` 
+
+```js
+export class Store {
+  // ...
+  dispatch (_type, _payload) {
+    // check object-style dispatch
+    const {
+      type,
+      payload
+    } = unifyObjectStyle(_type, _payload)
+
+    const action = { type, payload }
+    const entry = this._actions[type]
+    if (!entry) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.error(`[vuex] unknown action type: ${type}`)
+      }
+      return
+    }
+
+    try {
+      this._actionSubscribers
+        .slice() // shallow copy to prevent iterator invalidation if subscriber synchronously calls unsubscribe
+        .filter(sub => sub.before)
+        .forEach(sub => sub.before(action, this.state))
+    } catch (e) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(`[vuex] error in before action subscribers: `)
+        console.error(e)
+      }
+    }
+
+    const result = entry.length > 1
+      ? Promise.all(entry.map(handler => handler(payload)))
+      : entry[0](payload)
+
+    return result.then(res => {
+      try {
+        this._actionSubscribers
+          .filter(sub => sub.after)
+          .forEach(sub => sub.after(action, this.state))
+      } catch (e) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn(`[vuex] error in after action subscribers: `)
+          console.error(e)
+        }
+      }
+      return res
+    })
+  }
+}
+```
+
+​		这里传入的 `_type` 就是 `action` 的 `type` ，我们可以从 `store.__actions` 找到对应的函数数组，遍历它们执行获取到每个 `handler` 然后执行，实际上就是执行了 `wrappedActionHandler(payload)` ，接着会执行我们定义的 `action` 函数，并传入一个对象，包含了当前模块下的 `dispatch`、`commit`  、`getters`、`state` ，以及全局的 `rootState` 和 `rootGetters` ，所以我们定义的 `action`函数能拿到当前模块下的 `commit` 方法。
+​		 因此 `action` 比我们自己写一个函数执行异步操作然后提交 `muataion` 的好处是在于它可以在参数中获取到当前模块的一些方法和状态，`Vuex` 帮我们做好了这些。
+
 #### 		4.3 语法糖
+
+​		我们知道 `store` 是 `Store` 对象的一个实例，它是一个原生的` Javascript` 对象，我们可以在任意地方 使用它们。但大部分的使用场景还是在组件中使用，那么我们之前介绍过，在 ` Vuex` 安装阶段，它会往每一个组件实例上混入 `befeforeCreated` 钩子函数，然后往组件实例上添加一个 `$store` 的实例，它指向的就是我们实例化的 `store` ，因此我们可以在组件中访问到` store` 的任何属性和方法。
+
+​		比如我们在组件中访问 `state` :
+
+```js
+const Counter = {
+	template: `<div>{{ count }}</div>`, 
+  computed: {
+		count () {
+			return this.$store.state.count
+		} 
+  }
+}
+```
+
+​		但是当一个组件需要获取多个状态时候，将这些状态都声明为计算属性会有些重复和冗余。同样这些问题也在存于 `getter` 、 `mutation` 和 `action` 。
+
+​		为了解决这个问题，`Vuex` 提供了一系列 `mapXXX` 辅助函数帮助我们实现在组件中可以很方便的注入 `store` 的属性和方法。
 
 ##### 				4.3.1 `mapState`
 
+​			我们先来看一下 mapState 的用法。
+
+```js
+// 在单独构建的版本中辅助函数为 Vuex.mapState 
+import { mapState } from 'vuex'
+export default { 
+  // ...
+  computed: mapState({
+		// 箭头函数可使代码更简练
+		count: state => state.count,
+		// 传字符串参数 'count' 等同于 `state => state.count` 
+    countAlias: 'count',
+		// 为了能够使用 `this` 获取局部状态，必须使用常规函数 
+    countPlusLocalState (state) {
+			return state.count + this.localCount 
+    }
+	}) 
+}
+```
+
+​			再来看一下 `mapState` 方法的定义。
+
+​			源码目录：`src/helpers.js`
+
+```js
+/**
+ * Reduce the code which written in Vue.js for getting the state.
+ * @param {String} [namespace] - Module's namespace
+ * @param {Object|Array} states # Object's item can be a function which accept state and getters for param, you can do something for state and getters in it.
+ * @param {Object}
+ */
+export const mapState = normalizeNamespace((namespace, states) => {
+  const res = {}
+  if (process.env.NODE_ENV !== 'production' && !isValidMap(states)) {
+    console.error('[vuex] mapState: mapper parameter must be either an Array or an Object')
+  }
+  normalizeMap(states).forEach(({ key, val }) => {
+    res[key] = function mappedState () {
+      let state = this.$store.state
+      let getters = this.$store.getters
+      if (namespace) {
+        const module = getModuleByNamespace(this.$store, 'mapState', namespace)
+        if (!module) {
+          return
+        }
+        state = module.context.state
+        getters = module.context.getters
+      }
+      return typeof val === 'function'
+        ? val.call(this, state, getters)
+        : state[val]
+    }
+    // mark vuex getter for devtools
+    res[key].vuex = true
+  })
+  return res
+})
+
+/**
+ * Return a function expect two param contains namespace and map. it will normalize the namespace and then the param's function will handle the new namespace and the map.
+ * @param {Function} fn
+ * @return {Function}
+ */
+function normalizeNamespace (fn) {
+  return (namespace, map) => {
+    if (typeof namespace !== 'string') {
+      map = namespace
+      namespace = ''
+    } else if (namespace.charAt(namespace.length - 1) !== '/') {
+      namespace += '/'
+    }
+    return fn(namespace, map)
+  }
+}
+
+/**
+ * Normalize the map
+ * normalizeMap([1, 2, 3]) => [ { key: 1, val: 1 }, { key: 2, val: 2 }, { key: 3, val: 3 } ]
+ * normalizeMap({a: 1, b: 2, c: 3}) => [ { key: 'a', val: 1 }, { key: 'b', val: 2 }, { key: 'c', val: 3 } ]
+ * @param {Array|Object} map
+ * @return {Object}
+ */
+function normalizeMap (map) {
+  if (!isValidMap(map)) {
+    return []
+  }
+  return Array.isArray(map)
+    ? map.map(key => ({ key, val: key }))
+    : Object.keys(map).map(key => ({ key, val: map[key] }))
+}
+```
+
+​			首先 `mapState` 是通过执行 `normalizeNamespace` 返回的函数，它接收 2 个参数，其中 `namespace` 表示命名空间， `map` 表示具体的对象， `namespace` 可不传，稍后我们来介绍 `namespace`  的作用。
+
+​			当执行 `mapState(map)` 函数的时候，实际上就是执行 `normalizeNamespace` 包裹的函数，然后把 `map` 作为参数 `state` 传入。
+
+​			`mapState` 最终是要构造一个对象，每个对象的元素都是一个方法，因为这个对象是要扩展到组件的 `computed`计算属性中的。函数首先执行 ` normalizeMap` 方法，把这个 `states` 变成一个数组，数组的每个元素都是 `{key, val}` 的形式。接着再遍历这个数组，以 `key` 作为对象的 `key` ，值为一个 `mappedState` 的函数，在这个函数的内部，获取到 `$store.getters` 和 `$store.state` 然后再判断数组的 `val ` 如果是一个函数，执行该函数，传入`state` 和  `getters` ，否则直接访问 `state[val]` 。
+
+​			 比起一个个手动声明计算属性， `mapState` 确实要方便许多，下面我们来看一下 `namespace` 的作用。
+ 			当我们想访问一个子模块的 `state` 的时候，我们可能需要这样访问:
+
+```js
+computed: {
+  mapState({
+		a: state => state.some.nested.module.a,
+		b: state => state.some.nested.module.b 
+  })
+},
+```
+
+​			这样从写法上就很不友好， `mapState` 支持传入 `namespace` ， 因此我们可以这么写:
+
+```js
+computed: {
+  mapState('some/nested/module', {
+		a: state => state.a,
+		b: state => state.b 
+  })
+},
+```
+
+​			这样看起来就清爽许多。在 `mapState` 的实现中，如果有 `namespace`，则尝试去通过 `getModuleByNamespace(store, helper, namespace)` 对应的 `module` ，然后把 `state` 和 `getters` 修改为 `module` 对应的  `state` 和 `getters` 。
+
+​			源码目录：`src/helpers.js`
+
+```js
+/**
+ * Search a special module from store by namespace. if module not exist, print error message.
+ * @param {Object} store
+ * @param {String} helper
+ * @param {String} namespace
+ * @return {Object}
+ */
+function getModuleByNamespace (store, helper, namespace) {
+  const module = store._modulesNamespaceMap[namespace]
+  if (process.env.NODE_ENV !== 'production' && !module) {
+    console.error(`[vuex] module namespace not found in ${helper}(): ${namespace}`)
+  }
+  return module
+}
+
+```
+
+​			我们在 `Vuex` 初始化执行 `installModule` 的过程中，初始化了这个映射表。
+
+​			源码目录：`src/store.js`
+
+```js
+function installModule (store, rootState, path, module, hot) {
+  // ...
+  const namespace = store._modules.getNamespace(path)
+
+  // register in namespace map
+  if (module.namespaced) {
+    if (store._modulesNamespaceMap[namespace] && process.env.NODE_ENV !== 'production') {
+      console.error(`[vuex] duplicate namespace ${namespace} for the namespaced module ${path.join('/')}`)
+    }
+    store._modulesNamespaceMap[namespace] = module
+  }
+
+  // ....
+}
+```
+
 ##### 				4.3.2 `mapGetters`
+
+​			我们先来看一下 mapGetters 的用法。
+
+```js
+import { mapGetters } from 'vuex'
+export default { // ...
+  computed: {
+  // 使用对象展开运算符将 getter 混入 computed 对象中 
+    mapGetters([
+      'doneTodosCount', 
+      'anotherGetter', // ...
+    ]) 
+  }
+}
+```
+
+​			和 `mapState` 类似， `mapGetters` 是将 `store` 中的 `getter` 映射到局部计算属性，来看一下它的定义。
+
+​			源码目录：`src/helpers.js`
+
+```js
+/**
+ * Reduce the code which written in Vue.js for getting the getters
+ * @param {String} [namespace] - Module's namespace
+ * @param {Object|Array} getters
+ * @return {Object}
+ */
+export const mapGetters = normalizeNamespace((namespace, getters) => {
+  const res = {}
+  if (process.env.NODE_ENV !== 'production' && !isValidMap(getters)) {
+    console.error('[vuex] mapGetters: mapper parameter must be either an Array or an Object')
+  }
+  normalizeMap(getters).forEach(({ key, val }) => {
+    // The namespace has been mutated by normalizeNamespace
+    val = namespace + val
+    res[key] = function mappedGetter () {
+      if (namespace && !getModuleByNamespace(this.$store, 'mapGetters', namespace)) {
+        return
+      }
+      if (process.env.NODE_ENV !== 'production' && !(val in this.$store.getters)) {
+        console.error(`[vuex] unknown getter: ${val}`)
+        return
+      }
+      return this.$store.getters[val]
+    }
+    // mark vuex getter for devtools
+    res[key].vuex = true
+  })
+  return res
+})
+```
+
+​			`mapGetters` 也同样支持 `namespace` ，如果不写 `namespace`  ，访问一个子 `module` 的属性需要写很⻓的 `key` ，一旦我们使用了 `namespace` ，就可以方便我们的书写，每个 `mappedGetter` 的实现实际上就是取 `this.$store.getters[val]`。
 
 ##### 				4.3.3 `mapMutations`
 
+​			我们可以在组件中使用 `this.$store.commit('xxx')` 提交 `mutation` ，或者使用 `mapMutations`  辅助函数将组件中的 `methods` 映射为 `store.commit`  的调用。
+
+​			我们先来看一下 mapMutations 的用法:
+
+```js
+import { mapMutations } from 'vuex'
+export default { 
+  // ...
+	methods: { 
+    ...mapMutations([
+			'increment', // 将 `this.increment()` 映射为 `this.$store.commit('increment')`
+			// `mapMutations` 也支持载荷:
+			'incrementBy' // 将 `this.incrementBy(amount)` 映射为 `this.$store.commit('inc rementBy', amount)`
+		]), 
+    ...mapMutations({
+			add: 'increment' // 将 `this.add()` 映射为 `this.$store.commit('increment')` 
+    })
+	} 
+}
+```
+
+​			`mapMutations` 支持传入一个数组或者一个对象，目标都是组件中对应的 `methods` 映射为 `store.commit` 的调用。来看一下它的定义。
+
+​			源码目录：`src/helpers.js`
+
+```js
+/**
+ * Reduce the code which written in Vue.js for committing the mutation
+ * @param {String} [namespace] - Module's namespace
+ * @param {Object|Array} mutations # Object's item can be a function which accept `commit` function as the first param, it can accept anthor params. You can commit mutation and do any other things in this function. specially, You need to pass anthor params from the mapped function.
+ * @return {Object}
+ */
+export const mapMutations = normalizeNamespace((namespace, mutations) => {
+  const res = {}
+  if (process.env.NODE_ENV !== 'production' && !isValidMap(mutations)) {
+    console.error('[vuex] mapMutations: mapper parameter must be either an Array or an Object')
+  }
+  normalizeMap(mutations).forEach(({ key, val }) => {
+    res[key] = function mappedMutation (...args) {
+      // Get the commit method from store
+      let commit = this.$store.commit
+      if (namespace) {
+        const module = getModuleByNamespace(this.$store, 'mapMutations', namespace)
+        if (!module) {
+          return
+        }
+        commit = module.context.commit
+      }
+      return typeof val === 'function'
+        ? val.apply(this, [commit].concat(args))
+        : commit.apply(this.$store, [val].concat(args))
+    }
+  })
+  return res
+})
+```
+
+​			可以看到 `mappedMutation` 同样支持了 `namespace`，并且支持了传入额外的参数  `args`，作为提交 `mutation` 的 `playload`，最终就是执行了`store.commit` 方法，并且这个 `commit`  会根据传入的 `namespace` 映射到对应 `module` 的 `commit` 上。
+
 ##### 				4.3.4 `mapActions`
+
+​			我们可以在组件中使用 `this.$store.dispatch('xxx')` 提交 `action` ，或者使用 `mapActions` 辅助函数将组建中的 `methods` 映射为 `store.dispatch` 的调用。
+
+​			`mapActions` 在用法上和 `mapMutations` 几乎一样，实现也很类似:
+
+​			源码目录：`src/helpers.js`
+
+```js
+/**
+ * Reduce the code which written in Vue.js for dispatch the action
+ * @param {String} [namespace] - Module's namespace
+ * @param {Object|Array} actions # Object's item can be a function which accept `dispatch` function as the first param, it can accept anthor params. You can dispatch action and do any other things in this function. specially, You need to pass anthor params from the mapped function.
+ * @return {Object}
+ */
+export const mapActions = normalizeNamespace((namespace, actions) => {
+  const res = {}
+  if (process.env.NODE_ENV !== 'production' && !isValidMap(actions)) {
+    console.error('[vuex] mapActions: mapper parameter must be either an Array or an Object')
+  }
+  normalizeMap(actions).forEach(({ key, val }) => {
+    res[key] = function mappedAction (...args) {
+      // get dispatch function from store
+      let dispatch = this.$store.dispatch
+      if (namespace) {
+        const module = getModuleByNamespace(this.$store, 'mapActions', namespace)
+        if (!module) {
+          return
+        }
+        dispatch = module.context.dispatch
+      }
+      return typeof val === 'function'
+        ? val.apply(this, [dispatch].concat(args))
+        : dispatch.apply(this.$store, [val].concat(args))
+    }
+  })
+  return res
+})
+
+```
+
+​		和 `mapMutations` 的实现几乎一样，不同的是把 `commit` 方法换成了 `dispatch` 。
 
 #### 		4.4 动态更新模块
 
+​		在 `Vuex` 初始化阶段我们构造了模块树，初始化了模块上各个部分。在有一些场景下，我们需要动态去注入一些新的模块，`Vuex` 提供了模块动态注册功能，在` store` 上提供了一个 `registerModule` 的 `API`。
+
+​		源码目录：`src/store.js`
+
+```js
+registerModule (path, rawModule, options = {}) {
+  if (typeof path === 'string') path = [path]
+
+  if (process.env.NODE_ENV !== 'production') {
+    assert(Array.isArray(path), `module path must be a string or an Array.`)
+    assert(path.length > 0, 'cannot register the root module by using registerModule.')
+  }
+
+  this._modules.register(path, rawModule)
+  installModule(this, this.state, path, this._modules.get(path), options.preserveState)
+  // reset store to update getters...
+  resetStoreVM(this, this.state)
+}
+```
+
+​		`registerModule` 支持传入一个 `path` 模块路径和 `rawModule` 模块定义，首先执行 `register ` 方法扩展我们的模块树，接着执行 `installModule` 去安装模块，最后执行 `resetStoreVM` 重新实例化 `store._vm`，并销毁旧的 `store._vm`。
+
+​		源码目录：`src/module/module-collection.js`
+
+```js
+export default class ModuleCollection {
+  // ...
+  register (path, rawModule, runtime = true) {
+    if (process.env.NODE_ENV !== 'production') {
+      assertRawModule(path, rawModule)
+    }
+
+    const newModule = new Module(rawModule, runtime)
+    if (path.length === 0) {
+      this.root = newModule
+    } else {
+      const parent = this.get(path.slice(0, -1))
+      parent.addChild(path[path.length - 1], newModule)
+    }
+
+    // register nested modules
+    if (rawModule.modules) {
+      forEachValue(rawModule.modules, (rawChildModule, key) => {
+        this.register(path.concat(key), rawChildModule, runtime)
+      })
+    }
+  }
+  // ...
+}
+```
+
+
+
+​		相对的，有动态注册模块的需求就有动态卸载模块的需求，`Vuex` 提供了模块动态卸载功能，在` store` 上提供了一个 `unregisterModule` 的 `API`。
+
+​		源码目录：`src/store.js`
+
+```js
+unregisterModule (path) {
+  if (typeof path === 'string') path = [path]
+
+  if (process.env.NODE_ENV !== 'production') {
+    assert(Array.isArray(path), `module path must be a string or an Array.`)
+  }
+
+  this._modules.unregister(path)
+  this._withCommit(() => {
+    const parentState = getNestedState(this.state, path.slice(0, -1))
+    Vue.delete(parentState, path[path.length - 1])
+  })
+  resetStore(this)
+}
+```
+
+​		`unregisterModule` 支持传入一个 `path` 模块路径，首先执行 `unregister` 方法去修剪我们的模块树。
+
+​		源码目录：`src/module/module-collection.js`
+
+```js
+export default class ModuleCollection {
+  // ...
+  unregister (path) {
+    const parent = this.get(path.slice(0, -1))
+    const key = path[path.length - 1]
+    if (!parent.getChild(key).runtime) return
+
+    parent.removeChild(key)
+  }
+}
+```
+
+​		注意，这里只会移除我们运行时动态创建的模块。
+
+​		接着会删除 `state` 在该路径下的引用，最后执行 `resetStore` 方法。
+
+​		源码目录：`src/store.js`
+
+```js
+function resetStore (store, hot) {
+  store._actions = Object.create(null)
+  store._mutations = Object.create(null)
+  store._wrappedGetters = Object.create(null)
+  store._modulesNamespaceMap = Object.create(null)
+  const state = store.state
+  // init all modules
+  installModule(store, state, [], store._modules.root, true)
+  // reset vm
+  resetStoreVM(store, state, hot)
+}
+```
+
+​		该方法就是把 `store` 下的对应存储的 `_actions`、`_mutations`、 `_wrappedGetters` 和 `_modulesNamespaceMap` 都清空，然后重新执行 `installModule` 安装所有模块以及 `resetStoreVM` 重置 `store._vm` 。
+
+​		源码目录：`src/store.js`
+
+```js
+function resetStoreVM (store, state, hot) {
+  const oldVm = store._vm
+
+  // bind store public getters
+  store.getters = {}
+  // reset local getters cache
+  store._makeLocalGettersCache = Object.create(null)
+  const wrappedGetters = store._wrappedGetters
+  const computed = {}
+  forEachValue(wrappedGetters, (fn, key) => {
+    // use computed to leverage its lazy-caching mechanism
+    // direct inline function use will lead to closure preserving oldVm.
+    // using partial to return function with only arguments preserved in closure environment.
+    computed[key] = partial(fn, store)
+    Object.defineProperty(store.getters, key, {
+      get: () => store._vm[key],
+      enumerable: true // for local getters
+    })
+  })
+
+  // use a Vue instance to store the state tree
+  // suppress warnings just in case the user has added
+  // some funky global mixins
+  const silent = Vue.config.silent
+  Vue.config.silent = true
+  store._vm = new Vue({
+    data: {
+      $$state: state
+    },
+    computed
+  })
+  Vue.config.silent = silent
+
+  // enable strict mode for new vm
+  if (store.strict) {
+    enableStrictMode(store)
+  }
+
+  if (oldVm) {
+    if (hot) {
+      // dispatch changes in all subscribed watchers
+      // to force getter re-evaluation for hot reloading.
+      store._withCommit(() => {
+        oldVm._data.$$state = null
+      })
+    }
+    Vue.nextTick(() => oldVm.$destroy())
+  }
+}		
+```
+
 #### 		4.5 总结
 
-源码目录：`src/store.js`
+​		那么至此，`Vuex` 提供的一些常用 `API` 我们就分析完了，包括数据的存取、语法糖、模块的动态更新等。要理解 `Vuex` 提供这些 `API` 都是方便我们在对 `store` 做各种操作来完成各种能力，尤其是 `mapXXX` 的设计，让我们在使用 `API` 的时候更加方便，这也是我们今后在设计一些 `JavaScript` 库的时候，从 `API` 设计角度中应该学习的方向。
 
 ### 5. 插件
 
+​	`Vuex` 除了提供的存取能力，还提供了一种插件能力，让我们可以监控 `store` 的变化过程来做一些事情。
+
+​	`Vuex` 的 `store` 接受 `plugins` 选项，我们在实例化 `Store` 的时候可以传入插件，它是一个数组， 然后在执行 `Store` 构造函数的时候，会执行这些插件。
+
+​	源码目录：`src/store.js`
+
+```js
+export class Store {
+  constructor (options = {}) {
+    const {
+      plugins = [],
+      strict = false
+    } = options
+    
+    //...
+    
+    // apply plugins
+    plugins.forEach(plugin => plugin(this))
+  }
+}
+```
+
+​		在我们实际项目中，我们用到的最多的就是 `Vuex` 内置的 `Logger` 插件，它能够帮我们追踪 `state` 变化，然后输出一些格式化日志。下面我们就来分析这个插件的实现。
+
 #### 		5.1 `Logger`插件
+
+​		`Logger` 插件的定义。
+
+​		源码目录：`src/plugins/logger.js`
+
+```js
+// Credits: borrowed code from fcomb/redux-logger
+
+import { deepCopy } from '../util'
+
+export default function createLogger ({
+  collapsed = true,
+  filter = (mutation, stateBefore, stateAfter) => true,
+  transformer = state => state,
+  mutationTransformer = mut => mut,
+  logger = console
+} = {}) {
+  return store => {
+    let prevState = deepCopy(store.state)
+
+    store.subscribe((mutation, state) => {
+      if (typeof logger === 'undefined') {
+        return
+      }
+      const nextState = deepCopy(state)
+
+      if (filter(mutation, prevState, nextState)) {
+        const time = new Date()
+        const formattedTime = ` @ ${pad(time.getHours(), 2)}:${pad(time.getMinutes(), 2)}:${pad(time.getSeconds(), 2)}.${pad(time.getMilliseconds(), 3)}`
+        const formattedMutation = mutationTransformer(mutation)
+        const message = `mutation ${mutation.type}${formattedTime}`
+        const startMessage = collapsed
+          ? logger.groupCollapsed
+          : logger.group
+
+        // render
+        try {
+          startMessage.call(logger, message)
+        } catch (e) {
+          console.log(message)
+        }
+
+        logger.log('%c prev state', 'color: #9E9E9E; font-weight: bold', transformer(prevState))
+        logger.log('%c mutation', 'color: #03A9F4; font-weight: bold', formattedMutation)
+        logger.log('%c next state', 'color: #4CAF50; font-weight: bold', transformer(nextState))
+
+        try {
+          logger.groupEnd()
+        } catch (e) {
+          logger.log('—— log end ——')
+        }
+      }
+
+      prevState = nextState
+    })
+  }
+}
+
+function repeat (str, times) {
+  return (new Array(times + 1)).join(str)
+}
+
+function pad (num, maxLength) {
+  return repeat('0', maxLength - num.toString().length) + num
+}
+
+```
+
+​		插件函数接收的参数是 `store` 实例，它执行了 `store.subscribe` 方法，先来看一下 `subscribe` 的定义。
+
+​		源码目录：`src/store.js`
+
+```js
+export class Store {
+  subscribe (fn) {
+    return genericSubscribe(fn, this._subscribers)
+  }
+}
+
+function genericSubscribe (fn, subs) {
+  if (subs.indexOf(fn) < 0) {
+    subs.push(fn)
+  }
+  return () => {
+    const i = subs.indexOf(fn)
+    if (i > -1) {
+      subs.splice(i, 1)
+    }
+  }
+}
+```
+
+​		`subscribe` 的逻辑很简单，就是往 `this.subscribers` 去添加一个函数，并返回一个 `unsubscribe` 的方法。
+
+​		而我们在执行 `store.commit` 的方法的时候，会遍历 `this._subscribers` 执行它们对应的回调函数。
+
+​		源码目录：`src/store.js`
+
+```js
+export class Store {
+  commit (_type, _payload, _options) {
+    // check object-style commit
+    const {
+      type,
+      payload,
+      options
+    } = unifyObjectStyle(_type, _payload, _options)
+
+    const mutation = { type, payload }
+    // ...
+
+    this._subscribers
+      .slice() // shallow copy to prevent iterator invalidation if subscriber synchronously calls unsubscribe
+      .forEach(sub => sub(mutation, this.state))
+
+    // ...
+  }
+}
+```
+
+​		回到我们的 `Logger` 函数，它相当于订阅了 `mutation` 的提交，它的 `prevState` 表示之前的 `state` ，`nextState` 表示提交 `mutation`  后的 `state` ，这两个 `state` 都需要执行 `deepCopy` 方法拷⻉一份对象的副本，这样对他们的修改就不会影响原始 `store.state` 。
+
+ 		接下来就构造一些格式化的消息，打印出一些时间消息 `message`， 之前的状态 `prevState` ，对应的 `mutation` 操作 `formattedMutation` 以及下一个状态 `nextState`。
+ 		最后更新 `prevState = nextState` ，为下一次提交 `mutation` 输出日志做准备。
 
 #### 		5.2 总结
 
-
-
-
+​		那么至此 `Vuex` 的插件分析就结束了，`Vuex` 从设计上支持了插件，让我们很好地从外部追踪 `store` 内部的变化，` Logger` 插件在我们的开发阶段也提供了很好地指引作用。当然我们也可以自己去实现 `Vuex` 的插件，来帮助我们实现一些特定的需求。
 
 
 
