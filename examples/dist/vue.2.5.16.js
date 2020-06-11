@@ -14886,6 +14886,7 @@
             data += "tag:\"" + (el.tag) + "\",";
         }
         // module data generation functions
+        // 对静态属性 class 、style 和动态属性 :class 、:style 的处理，把处理结果值拼接起来返回
         for (var i = 0; i < state.dataGenFns.length; i++) {
             data += state.dataGenFns[i](el);
         }
